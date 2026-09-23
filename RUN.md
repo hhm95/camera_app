@@ -59,3 +59,53 @@ trong chứng chỉ của camera (dùng tên FQDN hợp lệ, ví dụ `camera-0
   Gói RTP bị mất trong một picture → bỏ picture đó và chờ IDR kế tiếp (không ghi/giải mã dữ liệu hỏng).
 - Host gửi keepalive mỗi 5 s; im lặng > 10 s → reconnect (backoff 1 s → 10 s). Camera đóng session im lặng > 15 s.
 - Chưa có: RTCP, pacing gói RTP, xác thực dashboard/HTTPS cho REST, nhiều camera đồng thời trong cấu hình mặc định (registry đã hỗ trợ nhiều mục).
+
+
+
+MANH NOTE:
+Mở hai cửa sổ cmd. Trên máy này wolfSSL, addon và chứng chỉ đã build sẵn, nên chỉ cần chạy 2 tiến trình.
+
+Cửa sổ 1: camera
+
+
+cd /d D:\trongkn\3.camera_app
+npm run start:camera
+Cửa sổ 2: host và dashboard
+
+
+cd /d D:\trongkn\3.camera_app
+npm run start:host
+Sau đó mở http://localhost:3000/ trong trình duyệt. Log ở cửa sổ camera và cửa sổ host phải có dòng DTLS established: DTLSv1.3 ... X25519 ... Ed25519. Nếu chạy host trước camera cũng được, vì host tự thử lại (backoff 1 s đến 10 s).
+
+Muốn dừng thì bấm Ctrl+C ở mỗi cửa sổ, camera dừng ffmpeg khi không còn client.
+
+Đổi cấu hình (dùng set trong cùng cửa sổ, trước khi chạy):
+
+
+set CAMERA_FPS=10
+set CAMERA_WIDTH=1280
+set CAMERA_HEIGHT=720
+set HOST_HTTP_PORT=8080
+npm run start:camera
+Nếu ffmpeg không nằm trong PATH thì đặt set FFMPEG=C:\ffmpeg\bin\ffmpeg.exe cho cả hai cửa sổ.
+
+Cài từ đầu trên máy mới (một lần):
+
+
+cd /d D:\trongkn\3.camera_app
+npm install
+npm run setup:wolfssl
+npm run build:addon
+npm run gen-certs
+npm test
+Các script setup gọi PowerShell bên trong, nên chạy được từ cmd bình thường. Cần cài Visual Studio 2022 (workload C++) và ffmpeg trước.
+
+Kiểm tra nhanh bằng cmd (curl có sẵn trên Windows 10):
+
+
+curl http://localhost:3000/api/cameras
+curl http://localhost:3000/api/cameras/camera_001/status
+curl -o snap.jpg http://localhost:3000/api/cameras/camera_001/live/snapshot.jpg
+Video và frame được lưu ở host_backend\data\YYYY\MM\DD\camera_001\. Xem lại video bằng ffplay <file>.h264.
+
+Nếu báo lỗi EADDRINUSE, cổng 3000 (host) hoặc UDP 5684 (camera) đang bị chiếm. Đổi bằng HOST_HTTP_PORT hoặc CAMERA_PORT, và nhớ đổi port tương ứng trong host_backend\cameras.json.
