@@ -1,0 +1,7 @@
+{
+  "name": "wolfssl-dtls",
+  "version": "0.1.0",
+  "private": true,
+  "description": "N-API binding exposing wolfSSL DTLS 1.3 as a datagram-in / datagram-out state machine",
+  "main": "index.js"
+}

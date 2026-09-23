@@ -1,0 +1,11 @@
+{
+  "name": "host-backend",
+  "version": "0.1.0",
+  "private": true,
+  "main": "src/index.js",
+  "dependencies": {
+    "camera-shared": "*",
+    "express": "^4.21.2",
+    "wolfssl-dtls": "*"
+  }
+}

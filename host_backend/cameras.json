@@ -1,0 +1,9 @@
+[
+  {
+    "id": "camera_001",
+    "name": "Camera 001 (simulated)",
+    "host": "127.0.0.1",
+    "port": 5684,
+    "serverName": "camera-001.local"
+  }
+]

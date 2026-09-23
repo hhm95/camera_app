@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Camera Dashboard</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>Camera Dashboard</h1>
+    <div class="topbar-right">
+      <span id="api-state" class="pill pill-off">connecting to host…</span>
+    </div>
+  </header>
+
+  <main>
+    <p class="hint">Live view and status come from the host backend API only — the dashboard never talks to a camera directly.</p>
+    <section id="cameras" class="grid" aria-live="polite"></section>
+    <p id="empty" class="empty" hidden>No cameras configured on the host.</p>
+  </main>
+
+  <template id="camera-card">
+    <article class="card">
+      <header class="card-head">
+        <div>
+          <h2 class="cam-name"></h2>
+          <div class="cam-addr muted"></div>
+        </div>
+        <span class="pill state"></span>
+      </header>
+
+      <div class="live">
+        <img class="live-img" alt="Live view">
+        <div class="live-overlay"></div>
+      </div>
+
+      <dl class="stats">
+        <div><dt>Resolution</dt><dd data-k="resolution">–</dd></div>
+        <div><dt>FPS</dt><dd data-k="fps">–</dd></div>
+        <div><dt>Bitrate</dt><dd data-k="bitrate">–</dd></div>
+        <div><dt>Frames</dt><dd data-k="frames">–</dd></div>
+        <div><dt>RTP lost</dt><dd data-k="lost">–</dd></div>
+        <div><dt>Reconnects</dt><dd data-k="reconnects">–</dd></div>
+        <div class="wide"><dt>DTLS</dt><dd data-k="dtls">–</dd></div>
+        <div class="wide"><dt>Last frame</dt><dd data-k="lastFrame">–</dd></div>
+      </dl>
+
+      <details class="recordings">
+        <summary>Recordings</summary>
+        <div class="rec-body">
+          <label>Day <select class="rec-day"></select></label>
+          <div class="rec-content muted">Select a day.</div>
+        </div>
+      </details>
+    </article>
+  </template>
+
+  <script src="app.js"></script>
+</body>
+</html>

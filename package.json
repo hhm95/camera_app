@@ -1,0 +1,25 @@
+{
+  "name": "ip-camera-dtls13",
+  "version": "0.1.0",
+  "private": true,
+  "description": "IP camera streaming over DTLS 1.3 (wolfSSL, X25519 + Ed25519) with RTP/H.264",
+  "workspaces": [
+    "native/wolfssl_dtls",
+    "shared",
+    "camera_server",
+    "host_backend"
+  ],
+  "scripts": {
+    "setup:wolfssl": "powershell -ExecutionPolicy Bypass -File scripts/setup-wolfssl.ps1",
+    "build:addon": "powershell -ExecutionPolicy Bypass -File scripts/build-addon.ps1",
+    "gen-certs": "node scripts/gen-certs.js",
+    "test": "node --test native/wolfssl_dtls/test shared/test",
+    "start:camera": "node camera_server/src/index.js",
+    "start:host": "node host_backend/src/index.js"
+  },
+  "devDependencies": {
+    "@peculiar/x509": "^1.12.3",
+    "cmake-js": "^7.3.0",
+    "node-addon-api": "^8.3.0"
+  }
+}
