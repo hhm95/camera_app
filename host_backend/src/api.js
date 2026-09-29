@@ -2,6 +2,7 @@
 // HTTP REST API for the dashboard (the dashboard never talks to the camera directly).
 
 const express = require('express');
+const { OggOpusWriter } = require('camera-shared');
 const { listDays, readDay, resolveFile } = require('./storage');
 
 const BOUNDARY = 'camframe';
@@ -29,6 +30,7 @@ function createApi({ cameras, dataDir, dashboardDir }) {
         links: {
           status: `/api/cameras/${s.id}/status`,
           live: `/api/cameras/${s.id}/live`,
+          liveAudio: `/api/cameras/${s.id}/live/audio`,
           snapshot: `/api/cameras/${s.id}/live/snapshot.jpg`,
           recordings: `/api/cameras/${s.id}/recordings`,
         },
@@ -65,6 +67,24 @@ function createApi({ cameras, dataDir, dashboardDir }) {
     req.on('close', () => cam.off('frame', send));
   });
 
+  // Live audio: a continuous Ogg/Opus byte stream, the same trick internet radio stations use for
+  // Ogg streams. Each listener gets its own OggOpusWriter (own header pages, own granule position)
+  // since Ogg Opus - unlike MP3 - can't be joined mid-stream without a fresh OpusHead/OpusTags.
+  api.get('/cameras/:id/live/audio', (req, res) => {
+    const cam = req.camera;
+    res.writeHead(200, {
+      'Content-Type': 'audio/ogg',
+      'Cache-Control': 'no-store, no-cache, must-revalidate',
+      Pragma: 'no-cache',
+      Connection: 'close',
+    });
+    const writer = new OggOpusWriter();
+    res.write(writer.header());
+    const send = (payload) => { if (!res.writableNeedDrain) res.write(writer.frame(payload)); };
+    cam.on('audioFrame', send);
+    req.on('close', () => cam.off('audioFrame', send));
+  });
+
   api.get('/cameras/:id/live/snapshot.jpg', (req, res) => {
     const cam = req.camera;
     if (!cam.latestFrame) return res.status(503).json({ error: 'no frame available yet', state: cam.status().state });
@@ -84,13 +104,16 @@ function createApi({ cameras, dataDir, dashboardDir }) {
       ...day,
       video: day.video.map((f) => ({ ...f, url: url('video', f.name) })),
       frames: day.frames.map((f) => ({ ...f, url: url('frames', f.name) })),
+      audio: day.audio.map((f) => ({ ...f, url: url('audio', f.name) })),
     });
   });
 
+  const CONTENT_TYPES = { '.jpg': 'image/jpeg', '.opus': 'audio/ogg', '.h264': 'video/h264' };
   api.get('/cameras/:id/recordings/:date/files/:kind/:name', (req, res) => {
     const file = resolveFile(dataDir, req.camera.id, req.params.date, req.params.kind, req.params.name);
     if (!file) return res.status(404).json({ error: 'file not found' });
-    res.sendFile(file, { headers: { 'Content-Type': file.endsWith('.jpg') ? 'image/jpeg' : 'application/octet-stream' } });
+    const ext = file.slice(file.lastIndexOf('.'));
+    res.sendFile(file, { headers: { 'Content-Type': CONTENT_TYPES[ext] || 'application/octet-stream' } });
   });
 
   api.use((req, res) => res.status(404).json({ error: 'not found' }));

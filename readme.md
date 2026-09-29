@@ -422,3 +422,15 @@ RFC 9147
 
 Express/NestJS chỉ phụ trách **HTTP API**, không phụ trách DTLS.
 Một điểm mình sẽ chốt thêm cho Claude Code: dùng X25519 + Ed25519. Và ở Phase đầu chỉ cần 1 camera + 1 client + H.264 pattern, sau khi đường DTLS → RTP → H.264 chạy ổn mới mở rộng 5 camera.
+
+
+Phần 2.
+kết quả phần 1 ở trên: đã view live được 1 camera
+nội dung phần 2:
+-thêm 1 loại bản tin nữa là âm thanh của camera sẽ được gửi cùng vào đường truyền trên.
+-dự kiến định nghĩa ở phần RTP packet: tôi tìm hiểu thì có thể dùng SSRC trong RTP header,
+
+test: 
+camera_server: tạo demo âm thanh giống như việc tạo pattern hình ảnh đang có
+host_backend: nhận và lưu vào thư mục riêng
+phát live có sẽ âm thanh đi kèm theo đúng hình ảnh + âm thanh

@@ -18,6 +18,11 @@ module.exports = {
     bitrateKbps: num(process.env.CAMERA_BITRATE_KBPS, 800),
     gop: num(process.env.CAMERA_GOP, 30),
   },
+  audio: {
+    sourceFile: process.env.CAMERA_AUDIO_FILE || path.join(root, 'camera_server', 'src', 'audio_demo', 'Một Con Vịt.mp3'),
+    bitrateKbps: num(process.env.CAMERA_AUDIO_BITRATE_KBPS, 32),
+    frameMs: num(process.env.CAMERA_AUDIO_FRAME_MS, 20),
+  },
   maxClients: num(process.env.CAMERA_MAX_CLIENTS, 4),
   handshakeTimeoutMs: 10_000,
   idleTimeoutMs: 15_000, // host sends keepalives; drop the session when it goes silent

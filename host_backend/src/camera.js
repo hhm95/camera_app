@@ -2,7 +2,7 @@
 // One camera on the host: DTLS transport -> RTP depacketizer -> (recorder, decoder) -> live frame.
 
 const { EventEmitter } = require('node:events');
-const { RtpDepacketizer, toAnnexB, nalType, NAL } = require('camera-shared');
+const { RtpDepacketizer, RtpFrameDepacketizer, parseRtp, toAnnexB, nalType, NAL, PT_H264, PT_OPUS } = require('camera-shared');
 const { CameraClient } = require('./camera-client');
 const { JpegDecoder, jpegSize } = require('./decoder');
 const { CameraStorage } = require('./storage');
@@ -33,9 +33,13 @@ class Camera extends EventEmitter {
     this.framesReceived = 0;
     this.framesDecoded = 0;
     this.framesDropped = 0;
-    this.rtp = new RtpDepacketizer();
+    this.audioFramesReceived = 0;
+    this.unknownPayloadType = 0;
+    this.videoRtp = new RtpDepacketizer();
+    this.audioRtp = new RtpFrameDepacketizer();
     this._needKey = true;
     this._window = []; // { t, bytes } per access unit, for fps / bitrate
+    this._audioWindow = []; // { t, bytes } per audio frame, for bitrate
 
     this.client.on('state', (state, detail) => this.emit('state', state, detail));
     this.client.on('connected', (info) => this._onConnected(info));
@@ -58,9 +62,11 @@ class Camera extends EventEmitter {
   _onConnected(info) {
     this.dtls = info;
     this.connectedSince = new Date();
-    this.rtp = new RtpDepacketizer(); // new session => new RTP stream
+    this.videoRtp = new RtpDepacketizer(); // new session => new RTP streams
+    this.audioRtp = new RtpFrameDepacketizer();
     this._needKey = true;
     this._window = [];
+    this._audioWindow = [];
     this.decoder.reset();
     this.storage.event('connected', {
       dtls: { version: info.version, cipher: info.cipher, group: info.group, signature: info.signature, peer: info.peerSubject },
@@ -74,25 +80,45 @@ class Camera extends EventEmitter {
     this.connectedSince = null;
   }
 
+  // Demux by RTP payload type before any packet reaches a depacketizer: RtpDepacketizer resets
+  // its reassembly state whenever the SSRC changes, so feeding it packets from both streams (or
+  // feeding audio bytes into the H.264-aware NAL/STAP-A/FU-A parser) would corrupt both streams.
   _onRtp(pkt) {
-    for (const au of this.rtp.push(pkt)) {
-      this.framesReceived++;
-      const isIdr = au.nals.some((n) => nalType(n) === NAL.IDR);
-      if (au.damaged) {
-        // packets were lost inside this picture: wait for the next IDR instead of feeding garbage
-        this._needKey = true;
-        this.framesDropped++;
-        continue;
-      }
-      if (this._needKey) {
-        if (!isIdr) { this.framesDropped++; continue; }
-        this._needKey = false;
-      }
-      const annexB = toAnnexB(au.nals);
-      this._window.push({ t: Date.now(), bytes: annexB.length });
-      this.storage.writeAccessUnit(annexB, isIdr);
-      this.decoder.write(annexB);
+    const rtp = parseRtp(pkt);
+    if (!rtp) return;
+    if (rtp.payloadType === PT_H264) {
+      for (const au of this.videoRtp.push(pkt)) this._onVideoAu(au);
+    } else if (rtp.payloadType === PT_OPUS) {
+      for (const f of this.audioRtp.push(pkt)) this._onAudioFrame(f);
+    } else {
+      this.unknownPayloadType++;
     }
+  }
+
+  _onVideoAu(au) {
+    this.framesReceived++;
+    const isIdr = au.nals.some((n) => nalType(n) === NAL.IDR);
+    if (au.damaged) {
+      // packets were lost inside this picture: wait for the next IDR instead of feeding garbage
+      this._needKey = true;
+      this.framesDropped++;
+      return;
+    }
+    if (this._needKey) {
+      if (!isIdr) { this.framesDropped++; return; }
+      this._needKey = false;
+    }
+    const annexB = toAnnexB(au.nals);
+    this._window.push({ t: Date.now(), bytes: annexB.length });
+    this.storage.writeAccessUnit(annexB, isIdr);
+    this.decoder.write(annexB);
+  }
+
+  _onAudioFrame(f) {
+    this.audioFramesReceived++;
+    this._audioWindow.push({ t: Date.now(), bytes: f.payload.length });
+    this.storage.writeAudioFrame(f.payload);
+    this.emit('audioFrame', f.payload);
   }
 
   _onFrame(jpeg) {
@@ -109,6 +135,9 @@ class Camera extends EventEmitter {
     this._window = this._window.filter((s) => now - s.t <= STATS_WINDOW_MS);
     const span = this._window.length > 1 ? (this._window.at(-1).t - this._window[0].t) / 1000 : 0;
     const bytes = this._window.reduce((s, x) => s + x.bytes, 0);
+    this._audioWindow = this._audioWindow.filter((s) => now - s.t <= STATS_WINDOW_MS);
+    const audioSpan = this._audioWindow.length > 1 ? (this._audioWindow.at(-1).t - this._audioWindow[0].t) / 1000 : 0;
+    const audioBytes = this._audioWindow.reduce((s, x) => s + x.bytes, 0);
     const c = this.client;
     return {
       id: this.id,
@@ -128,9 +157,16 @@ class Camera extends EventEmitter {
         bitrateKbps: span > 0 ? Math.round((bytes * 8) / span / 1000) : 0,
         framesReceived: this.framesReceived, framesDecoded: this.framesDecoded, framesDropped: this.framesDropped,
       },
-      rtp: {
-        packetsReceived: this.rtp.packetsReceived, packetsLost: this.rtp.packetsLost, octetsReceived: this.rtp.octetsReceived,
+      audio: {
+        codec: 'Opus', sampleRate: 48000,
+        bitrateKbps: audioSpan > 0 ? Math.round((audioBytes * 8) / audioSpan / 1000) : 0,
+        framesReceived: this.audioFramesReceived,
       },
+      rtp: {
+        video: { packetsReceived: this.videoRtp.packetsReceived, packetsLost: this.videoRtp.packetsLost, octetsReceived: this.videoRtp.octetsReceived },
+        audio: { packetsReceived: this.audioRtp.packetsReceived, packetsLost: this.audioRtp.packetsLost, octetsReceived: this.audioRtp.octetsReceived },
+      },
+      unknownPayloadType: this.unknownPayloadType,
       lastFrameAt: this.latestFrameAt && this.latestFrameAt.toISOString(),
     };
   }

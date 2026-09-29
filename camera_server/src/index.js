@@ -4,6 +4,7 @@
 const config = require('./config');
 const { DtlsServer } = require('./dtls-server');
 const { PatternEncoder } = require('./pattern-encoder');
+const { AudioEncoder } = require('./audio-encoder');
 const { Streamer } = require('./streamer');
 const { wolfsslVersion } = require('wolfssl-dtls');
 
@@ -12,9 +13,11 @@ const log = (level, msg) =>
 
 async function main() {
   log('info', `wolfSSL ${wolfsslVersion} initialised`);
-  const encoder = new PatternEncoder({ ffmpeg: config.ffmpeg, cameraId: config.cameraId, ...config.video });
-  encoder.on('error', (err) => log('error', err.message));
-  const streamer = new Streamer({ encoder, log });
+  const videoEncoder = new PatternEncoder({ ffmpeg: config.ffmpeg, cameraId: config.cameraId, ...config.video });
+  videoEncoder.on('error', (err) => log('error', err.message));
+  const audioEncoder = new AudioEncoder({ ffmpeg: config.ffmpeg, cameraId: config.cameraId, ...config.audio });
+  audioEncoder.on('error', (err) => log('error', err.message));
+  const streamer = new Streamer({ videoEncoder, audioEncoder, log });
 
   const server = new DtlsServer({ ...config, log });
   server.on('error', (err) => { log('error', err.message); process.exit(1); });
@@ -23,11 +26,12 @@ async function main() {
   server.on('clientClosed', (channel) => streamer.removeClient(channel));
 
   const addr = await server.listen();
-  log('info', `UDP server listening on ${addr.address}:${addr.port} (DTLS 1.3, ${config.video.width}x${config.video.height}@${config.video.fps})`);
+  log('info', `UDP server listening on ${addr.address}:${addr.port} (DTLS 1.3, ${config.video.width}x${config.video.height}@${config.video.fps}, audio Opus ${config.audio.bitrateKbps}kbps)`);
 
   const shutdown = async () => {
     log('info', 'shutting down');
-    encoder.stop();
+    videoEncoder.stop();
+    audioEncoder.stop();
     await server.close();
     process.exit(0);
   };

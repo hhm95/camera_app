@@ -6,6 +6,11 @@ const crypto = require('node:crypto');
 const RTP_HEADER = 12;
 const CLOCK_RATE = 90000;
 const PT_H264 = 96;
+const PT_OPUS = 97; // dynamic payload type (no signaling channel, agreed by convention like PT_H264)
+// RFC 7587: Opus's RTP clock rate is always nominally 48 kHz regardless of the actual encoded
+// sample rate. 960 = 20ms of it, matching the encoder's fixed 20ms frame duration.
+const OPUS_CLOCK_RATE = 48000;
+const OPUS_SAMPLES_PER_FRAME = 960;
 // One DTLS record carries one RTP packet. Stay well below a 1200 byte datagram, leaving room
 // for the DTLS 1.3 record header/tag and UDP/IP headers.
 const DEFAULT_MAX_PACKET = 1100;
@@ -54,6 +59,18 @@ class RtpPacketizer {
     flushGroup();
 
     return payloads.map((payload, i) => this._packet(payload, timestamp, i === payloads.length - 1));
+  }
+
+  /**
+   * Packetize one already-complete media frame that never needs fragmentation (e.g. one Opus
+   * audio frame). Unlike packetizeAccessUnit this has no codec-specific framing at all.
+   * @returns {Buffer[]} always exactly one RTP packet
+   */
+  packetizeFrame(payload, timestamp, marker = false) {
+    if (payload.length > this.maxPayload) {
+      throw new Error(`packetizeFrame: payload of ${payload.length} bytes exceeds maxPayload ${this.maxPayload}`);
+    }
+    return [this._packet(payload, timestamp, marker)];
   }
 
   _packet(payload, timestamp, marker) {
@@ -227,7 +244,44 @@ class RtpDepacketizer {
   }
 }
 
+/**
+ * Depacketizer for media where one RTP packet always carries exactly one complete, independently
+ * decodable frame (e.g. one Opus audio frame) - no NAL/STAP-A/FU-A reassembly needed. push() an
+ * RTP packet; returns the frame as [{ timestamp, payload }] (empty array if the packet was invalid
+ * or a duplicate/late arrival).
+ */
+class RtpFrameDepacketizer {
+  constructor() {
+    this.expectedSeq = null;
+    this.ssrc = null;
+    this.packetsReceived = 0;
+    this.packetsLost = 0;
+    this.octetsReceived = 0;
+  }
+
+  push(packet) {
+    const rtp = parseRtp(packet);
+    if (!rtp) return [];
+
+    if (this.ssrc !== null && rtp.ssrc !== this.ssrc) {
+      this.expectedSeq = null; // stream restarted with a new SSRC
+    }
+    this.ssrc = rtp.ssrc;
+
+    if (this.expectedSeq !== null) {
+      const delta = (rtp.seq - this.expectedSeq) & 0xffff;
+      if (delta > 0x8000) return []; // duplicate / late packet
+      if (delta > 0) this.packetsLost += delta;
+    }
+    this.expectedSeq = (rtp.seq + 1) & 0xffff;
+    this.packetsReceived++;
+    this.octetsReceived += rtp.payload.length;
+
+    return [{ timestamp: rtp.timestamp, payload: Buffer.from(rtp.payload) }];
+  }
+}
+
 module.exports = {
-  RTP_HEADER, CLOCK_RATE, PT_H264, DEFAULT_MAX_PACKET,
-  RtpPacketizer, RtpDepacketizer, parseRtp,
+  RTP_HEADER, CLOCK_RATE, PT_H264, PT_OPUS, OPUS_CLOCK_RATE, OPUS_SAMPLES_PER_FRAME, DEFAULT_MAX_PACKET,
+  RtpPacketizer, RtpDepacketizer, RtpFrameDepacketizer, parseRtp,
 };

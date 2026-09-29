@@ -116,6 +116,8 @@ main { padding: 16px max(16px, 3vw) 40px; }
 }
 .live.offline .live-overlay { display: flex; }
 
+.live-audio { width: 100%; display: block; margin: 0; }
+
 .stats {
   display: grid;
   grid-template-columns: repeat(3, 1fr);

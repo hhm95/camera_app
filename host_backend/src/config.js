@@ -19,6 +19,7 @@ module.exports = {
   storage: {
     segmentMs: num(process.env.HOST_SEGMENT_SECONDS, 300) * 1000, // new .h264 file every N seconds
     frameIntervalMs: num(process.env.HOST_FRAME_INTERVAL_SECONDS, 5) * 1000, // JPEG snapshot cadence
+    audioSegmentMs: num(process.env.HOST_AUDIO_SEGMENT_SECONDS, num(process.env.HOST_SEGMENT_SECONDS, 300)) * 1000, // new .opus file every N seconds
   },
   transport: {
     handshakeTimeoutMs: 10_000,

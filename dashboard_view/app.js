@@ -41,6 +41,12 @@ function createCard(cam) {
   // Live MJPEG stream: reload it when the camera comes back after an outage.
   card.img = el.querySelector('.live-img');
   card.img.addEventListener('error', () => { card.liveState = null; });
+
+  // Live audio: an independent MP3 stream, played alongside (not frame-synced to) the video.
+  card.audio = el.querySelector('.live-audio');
+  card.audioState = null;
+  card.audio.addEventListener('error', () => { card.audioState = null; });
+
   $grid.appendChild(el);
   cards.set(cam.id, card);
   return card;
@@ -66,13 +72,24 @@ function updateCard(card, s) {
     card.liveState = null;
   }
 
+  if (online && card.audioState !== 'streaming') {
+    card.audio.src = `${API}/api/cameras/${encodeURIComponent(s.id)}/live/audio?t=${Date.now()}`;
+    card.audio.play().catch(() => {}); // autoplay-with-sound may be blocked until a user gesture
+    card.audioState = 'streaming';
+  } else if (!online && s.state !== 'connected' && card.audioState) {
+    card.audio.removeAttribute('src');
+    card.audio.load();
+    card.audioState = null;
+  }
+
   const set = (k, v) => { el.querySelector(`[data-k="${k}"]`).textContent = v; };
   const v = s.video;
   set('resolution', v.resolution ? `${v.resolution.width}×${v.resolution.height}` : '–');
   set('fps', v.fps ? `${v.fps} fps` : '–');
   set('bitrate', v.bitrateKbps ? `${v.bitrateKbps} kbps` : '–');
   set('frames', `${v.framesDecoded} decoded / ${v.framesReceived} rx`);
-  set('lost', `${s.rtp.packetsLost} / ${s.rtp.packetsReceived} pkts`);
+  set('lost', `${s.rtp.video.packetsLost} / ${s.rtp.video.packetsReceived} pkts`);
+  set('audioLost', `${s.rtp.audio.packetsLost} / ${s.rtp.audio.packetsReceived} pkts`);
   set('reconnects', String(s.reconnects));
   set('dtls', s.dtls ? `${s.dtls.version} · ${s.dtls.group} key exchange · ${s.dtls.signature} certificate · ${s.dtls.cipher}` : 'not established');
   set('lastFrame', fmtTime(s.lastFrameAt));
@@ -119,6 +136,18 @@ async function loadDay(card, date) {
       ul.appendChild(li);
     }
     box.appendChild(ul);
+
+    add('h3', `Audio segments (${day.audio.length})`);
+    const aul = document.createElement('ul');
+    for (const f of day.audio) {
+      const li = document.createElement('li');
+      const a = document.createElement('a');
+      a.href = API + f.url;
+      a.textContent = f.name;
+      li.append(a, ` · ${fmtBytes(f.bytes)} · G.711 WAV`);
+      aul.appendChild(li);
+    }
+    box.appendChild(aul);
 
     add('h3', `Frames (${day.frames.length})`);
     const thumbs = document.createElement('div');
