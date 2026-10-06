@@ -23,6 +23,11 @@ module.exports = {
     bitrateKbps: num(process.env.CAMERA_AUDIO_BITRATE_KBPS, 32),
     frameMs: num(process.env.CAMERA_AUDIO_FRAME_MS, 20),
   },
+  replay: {
+    clipSeconds: num(process.env.CAMERA_REPLAY_CLIP_SECONDS, 10), // fake "recorded offline" clip, looped to fill the gap
+    maxGapMs: num(process.env.CAMERA_REPLAY_MAX_GAP_SECONDS, 300) * 1000, // never replay more than this
+    speed: num(process.env.CAMERA_REPLAY_SPEED, 1), // replay pacing relative to real time (1 = normal speed)
+  },
   maxClients: num(process.env.CAMERA_MAX_CLIENTS, 4),
   handshakeTimeoutMs: 10_000,
   idleTimeoutMs: 15_000, // host sends keepalives; drop the session when it goes silent

@@ -5,12 +5,14 @@
 const dgram = require('node:dgram');
 const { EventEmitter } = require('node:events');
 const { DtlsChannel } = require('wolfssl-dtls');
+const { MSG_CONTROL, encodeControl, decodeControl } = require('camera-shared');
 
 const KEEPALIVE = Buffer.from([0x01]); // application-level ping (RTP packets start with 0x80)
 
 class CameraClient extends EventEmitter {
   /**
-   * Events: 'state' (state, detail), 'connected' (dtlsInfo), 'disconnected' (reason), 'rtp' (Buffer)
+   * Events: 'state' (state, detail), 'connected' (dtlsInfo), 'disconnected' (reason), 'rtp' (Buffer),
+   * 'control' (object, a control message from the camera)
    */
   constructor({ host, port, serverName, ca, transport, log }) {
     super();
@@ -81,7 +83,10 @@ class CameraClient extends EventEmitter {
         this._setState('connected');
         this.emit('connected', info);
       });
-      channel.on('data', (d) => { if (d.length > 12 && d[0] >> 6 === 2) this.emit('rtp', d); });
+      channel.on('data', (d) => {
+        if (d.length > 12 && d[0] >> 6 === 2) this.emit('rtp', d);
+        else if (d[0] === MSG_CONTROL) { const msg = decodeControl(d); if (msg) this.emit('control', msg); }
+      });
       channel.on('error', (err) => { this.lastError = err.message; this.log('warn', err.message); });
       channel.on('close', () => fail('DTLS session closed'));
 
@@ -91,6 +96,13 @@ class CameraClient extends EventEmitter {
       this.log('info', `starting DTLS 1.3 handshake with ${this.host}:${this.port}`);
       try { channel.start(); } catch (err) { fail(err.message); }
     });
+  }
+
+  /** Send an application control message to the camera. @returns {boolean} false when not connected */
+  sendControl(obj) {
+    const ch = this._channel;
+    if (this.state !== 'connected' || !ch || ch.closed) return false;
+    try { ch.send(encodeControl(obj)); return true; } catch { return false; }
   }
 
   _startTimers(fail) {

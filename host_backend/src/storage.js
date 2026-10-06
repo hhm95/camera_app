@@ -4,7 +4,9 @@
 // video/     HHMMSS.h264      raw Annex-B segments (each starts on an IDR, so each is decodable)
 // frames/    HHMMSS_mmm.jpg   decoded snapshots, one every frameIntervalMs
 // audio/     HHMMSS.opus      Ogg/Opus segments, each its own independently-decodable Ogg stream
-// metadata/  events.jsonl     connection / DTLS / segment events
+// video_old/ HHMMSS.h264      media replayed by the camera after an outage (named by capture time)
+// audio_old/ HHMMSS.opus      same, audio
+// metadata/  events.jsonl     connection / DTLS / segment / sync events
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -26,6 +28,8 @@ class CameraStorage {
     this._video = null; // { stream, openedAt, path, bytes }
     this._audio = null; // { stream, openedAt, path, bytes, writer }
     this._lastFrameAt = 0;
+    this._oldVideo = null; // like _video, but for replayed ("old") media; times are capture times
+    this._oldAudio = null;
   }
 
   _dirs(date) {
@@ -35,6 +39,8 @@ class CameraStorage {
       video: path.join(base, 'video'),
       frames: path.join(base, 'frames'),
       audio: path.join(base, 'audio'),
+      videoOld: path.join(base, 'video_old'),
+      audioOld: path.join(base, 'audio_old'),
       metadata: path.join(base, 'metadata'),
     };
     for (const d of [dirs.video, dirs.frames, dirs.audio, dirs.metadata]) fs.mkdirSync(d, { recursive: true });
@@ -104,6 +110,69 @@ class CameraStorage {
     this.event('audio_segment_end', { file: path.basename(a.path), bytes: a.bytes });
   }
 
+  // ---- replayed media: written by capture time, never mixed with the live segments ------------
+
+  /** Append one replayed Annex-B access unit; `captureMs` is the camera's capture time. */
+  writeOldAccessUnit(annexB, isIdr, captureMs) {
+    const at = new Date(captureMs);
+    let v = this._oldVideo;
+    if (v && isIdr && (captureMs - v.startMs >= this.segmentMs || dateParts(at).d !== dateParts(new Date(v.startMs)).d)) {
+      this._closeOld('video');
+      v = null;
+    }
+    if (!v) {
+      if (!isIdr) return;
+      v = this._openOld('video', at, captureMs, 'h264');
+    }
+    v.stream.write(annexB);
+    v.bytes += annexB.length;
+    v.lastMs = captureMs;
+  }
+
+  writeOldAudioFrame(payload, captureMs) {
+    const at = new Date(captureMs);
+    let a = this._oldAudio;
+    if (a && (captureMs - a.startMs >= this.audioSegmentMs || dateParts(at).d !== dateParts(new Date(a.startMs)).d)) {
+      this._closeOld('audio');
+      a = null;
+    }
+    if (!a) {
+      a = this._openOld('audio', at, captureMs, 'opus');
+      a.writer = new OggOpusWriter();
+      a.stream.write(a.writer.header());
+    }
+    a.stream.write(a.writer.frame(payload));
+    a.bytes += payload.length;
+    a.lastMs = captureMs;
+  }
+
+  _openOld(kind, at, captureMs, ext) {
+    const dir = this._dirs(at)[kind === 'video' ? 'videoOld' : 'audioOld'];
+    fs.mkdirSync(dir, { recursive: true });
+    let file = path.join(dir, `${timeStamp(at)}.${ext}`);
+    for (let i = 1; fs.existsSync(file); i++) file = path.join(dir, `${timeStamp(at)}_${i}.${ext}`);
+    const stream = fs.createWriteStream(file);
+    stream.on('error', (err) => this.log('error', `old ${kind} write failed: ${err.message}`));
+    const seg = { stream, path: file, startMs: captureMs, lastMs: captureMs, bytes: 0, writer: null };
+    this[kind === 'video' ? '_oldVideo' : '_oldAudio'] = seg;
+    this.event(`old_${kind}_segment_start`, { file: path.basename(file), captureStart: at.toISOString() });
+    return seg;
+  }
+
+  _closeOld(kind) {
+    const key = kind === 'video' ? '_oldVideo' : '_oldAudio';
+    const s = this[key];
+    if (!s) return;
+    this[key] = null;
+    if (s.writer) s.stream.end(s.writer.close()); else s.stream.end();
+    this.event(`old_${kind}_segment_end`, {
+      file: path.basename(s.path), bytes: s.bytes, captureStart: new Date(s.startMs).toISOString(), captureEnd: new Date(s.lastMs).toISOString(),
+    });
+  }
+
+  /** Finish the replayed segments (sync done, or the link dropped again mid-replay). */
+  endOldSegments() { this._closeOld('video'); this._closeOld('audio'); }
+
   /** Rate-limited JPEG snapshot. */
   maybeSaveFrame(jpeg, now = new Date()) {
     if (now - this._lastFrameAt < this.frameIntervalMs) return;
@@ -123,9 +192,9 @@ class CameraStorage {
   }
 
   /** Stop writing the current segment (disconnect); a new one starts at the next IDR. */
-  endSegment() { this._closeVideo(); this._closeAudio(); }
+  endSegment() { this._closeVideo(); this._closeAudio(); this.endOldSegments(); }
 
-  close() { this._closeVideo(); this._closeAudio(); }
+  close() { this._closeVideo(); this._closeAudio(); this.endOldSegments(); }
 }
 
 // ---- read side (used by the REST API) -------------------------------------------------------
@@ -150,6 +219,8 @@ function listDays(dataDir, cameraId) {
           videoFiles: listDir(path.join(base, 'video'), (n) => n.endsWith('.h264')).length,
           frames: listDir(path.join(base, 'frames'), (n) => n.endsWith('.jpg')).length,
           audioFiles: listDir(path.join(base, 'audio'), (n) => n.endsWith('.opus')).length,
+          oldVideoFiles: listDir(path.join(base, 'video_old'), (n) => n.endsWith('.h264')).length,
+          oldAudioFiles: listDir(path.join(base, 'audio_old'), (n) => n.endsWith('.opus')).length,
         });
       }
     }
@@ -177,13 +248,15 @@ function readDay(dataDir, cameraId, date) {
     video: listDir(path.join(base, 'video'), (n) => n.endsWith('.h264')).map((n) => stat('video', n)),
     frames: listDir(path.join(base, 'frames'), (n) => n.endsWith('.jpg')).map((n) => stat('frames', n)),
     audio: listDir(path.join(base, 'audio'), (n) => n.endsWith('.opus')).map((n) => stat('audio', n)),
+    videoOld: listDir(path.join(base, 'video_old'), (n) => n.endsWith('.h264')).map((n) => stat('video_old', n)),
+    audioOld: listDir(path.join(base, 'audio_old'), (n) => n.endsWith('.opus')).map((n) => stat('audio_old', n)),
     events,
   };
 }
 
 /** Resolve a stored file for download, rejecting anything but plain file names. */
 function resolveFile(dataDir, cameraId, date, kind, name) {
-  if (!DATE_RE.test(date) || !['video', 'frames', 'audio', 'metadata'].includes(kind) || !SAFE_NAME.test(name)) return null;
+  if (!DATE_RE.test(date) || !['video', 'frames', 'audio', 'video_old', 'audio_old', 'metadata'].includes(kind) || !SAFE_NAME.test(name)) return null;
   const [y, m, d] = date.split('-');
   const file = path.join(dataDir, y, m, d, cameraId, kind, name);
   return fs.existsSync(file) ? file : null;

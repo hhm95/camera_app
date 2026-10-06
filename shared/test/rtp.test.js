@@ -2,7 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
-const { RtpPacketizer, RtpDepacketizer, RtpFrameDepacketizer, parseRtp, AnnexBParser, toAnnexB, AccessUnitBuilder, PT_H264, PT_OPUS } = require('..');
+const { RtpPacketizer, RtpDepacketizer, RtpFrameDepacketizer, parseRtp, AnnexBParser, toAnnexB, AccessUnitBuilder, PT_H264, PT_OPUS, PT_H264_OLD, PT_OPUS_OLD } = require('..');
 
 const nal = (type, size, nri = 0x60) => {
   const b = crypto.randomBytes(size);
@@ -132,4 +132,28 @@ test('AccessUnitBuilder groups parameter sets with the following slice', () => {
   const au = b.push(nal(5, 100));
   assert.equal(au.length, 3);
   assert.equal(b.push(nal(1, 100)).length, 1);
+});
+
+test('captureMs survives FU-A video fragmentation and audio frames; absent when not provided', () => {
+  const t = 1760000000123;
+  const vpk = new RtpPacketizer({ ssrc: 5, payloadType: PT_H264_OLD });
+  const nals = [nal(7, 20), nal(8, 6), nal(5, 20000)];
+  const packets = vpk.packetizeAccessUnit(nals, 0, t);
+  assert.ok(packets.length > 15);
+  assert.ok(packets.every((p) => p.length <= 1100));
+  assert.equal(parseRtp(packets[0]).captureMs, t);
+  assert.equal(parseRtp(packets[0]).payloadType, PT_H264_OLD);
+  assert.equal(parseRtp(packets[1]).captureMs, null);
+  const dp = new RtpDepacketizer();
+  const aus = packets.flatMap((p) => dp.push(p));
+  assert.equal(aus[0].captureMs, t);
+  assert.deepEqual(aus[0].nals, nals);
+
+  const apk = new RtpPacketizer({ ssrc: 6, payloadType: PT_OPUS_OLD });
+  const payload = crypto.randomBytes(100);
+  const [apkt] = apk.packetizeFrame(payload, 960, t + 20);
+  const [f] = new RtpFrameDepacketizer().push(apkt);
+  assert.equal(f.captureMs, t + 20);
+  assert.deepEqual(f.payload, payload);
+  assert.equal(parseRtp(apk.packetizeFrame(payload, 0)[0]).captureMs, null);
 });

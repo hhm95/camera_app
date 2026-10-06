@@ -11,6 +11,18 @@ const PT_OPUS = 97; // dynamic payload type (no signaling channel, agreed by con
 // sample rate. 960 = 20ms of it, matching the encoder's fixed 20ms frame duration.
 const OPUS_CLOCK_RATE = 48000;
 const OPUS_SAMPLES_PER_FRAME = 960;
+// "Old" (replayed) media travels on the same channel under its own payload types, so the host can
+// tell backfilled data from live data without any extra signaling.
+const PT_H264_OLD = 98;
+const PT_OPUS_OLD = 99;
+// First byte of an application control message (host -> camera sync request, camera -> host reply).
+// RTP packets start with 0x80..0xBF and the keepalive with 0x01, so this cannot collide.
+const MSG_CONTROL = 0x02;
+// Every media unit carries the camera's wall-clock capture time (UTC ms) in an RFC 3550 header
+// extension on its first packet. The RTP timestamps of video (90 kHz) and audio (48 kHz) are
+// unrelated counters; this shared clock is what lets the host match a picture with its sound.
+const EXT_PROFILE = 0x4341; // "CA"
+const EXT_SIZE = 4 + 8; // extension header + one uint64
 // One DTLS record carries one RTP packet. Stay well below a 1200 byte datagram, leaving room
 // for the DTLS 1.3 record header/tag and UDP/IP headers.
 const DEFAULT_MAX_PACKET = 1100;
@@ -22,7 +34,7 @@ class RtpPacketizer {
   constructor({ ssrc, payloadType = PT_H264, maxPacketSize = DEFAULT_MAX_PACKET, initialSeq } = {}) {
     this.ssrc = ssrc ?? crypto.randomBytes(4).readUInt32BE(0);
     this.payloadType = payloadType;
-    this.maxPayload = maxPacketSize - RTP_HEADER;
+    this.maxPayload = maxPacketSize - RTP_HEADER - EXT_SIZE; // worst case: extension on every packet
     this.seq = initialSeq ?? crypto.randomBytes(2).readUInt16BE(0);
     this.packetsSent = 0;
     this.octetsSent = 0;
@@ -31,9 +43,10 @@ class RtpPacketizer {
   /**
    * @param {Buffer[]} nals  NAL units of one access unit (no start codes)
    * @param {number} timestamp  90 kHz RTP timestamp (uint32)
+   * @param {number} [captureMs]  camera wall-clock capture time, carried in the first packet
    * @returns {Buffer[]} RTP packets; the marker bit is set on the last one
    */
-  packetizeAccessUnit(nals, timestamp) {
+  packetizeAccessUnit(nals, timestamp, captureMs) {
     const payloads = [];
     let group = [];
     let groupSize = 1; // STAP-A header byte
@@ -58,7 +71,7 @@ class RtpPacketizer {
     }
     flushGroup();
 
-    return payloads.map((payload, i) => this._packet(payload, timestamp, i === payloads.length - 1));
+    return payloads.map((payload, i) => this._packet(payload, timestamp, i === payloads.length - 1, i === 0 ? captureMs : undefined));
   }
 
   /**
@@ -66,21 +79,28 @@ class RtpPacketizer {
    * audio frame). Unlike packetizeAccessUnit this has no codec-specific framing at all.
    * @returns {Buffer[]} always exactly one RTP packet
    */
-  packetizeFrame(payload, timestamp, marker = false) {
+  packetizeFrame(payload, timestamp, captureMs, marker = false) {
     if (payload.length > this.maxPayload) {
       throw new Error(`packetizeFrame: payload of ${payload.length} bytes exceeds maxPayload ${this.maxPayload}`);
     }
-    return [this._packet(payload, timestamp, marker)];
+    return [this._packet(payload, timestamp, marker, captureMs)];
   }
 
-  _packet(payload, timestamp, marker) {
-    const pkt = Buffer.allocUnsafe(RTP_HEADER + payload.length);
-    pkt[0] = 0x80; // V=2, P=0, X=0, CC=0
+  _packet(payload, timestamp, marker, captureMs) {
+    const ext = captureMs !== undefined && captureMs !== null;
+    const hdr = RTP_HEADER + (ext ? EXT_SIZE : 0);
+    const pkt = Buffer.allocUnsafe(hdr + payload.length);
+    pkt[0] = ext ? 0x90 : 0x80; // V=2, P=0, X=ext, CC=0
     pkt[1] = (marker ? 0x80 : 0) | (this.payloadType & 0x7f);
     pkt.writeUInt16BE(this.seq, 2);
     pkt.writeUInt32BE(timestamp >>> 0, 4);
     pkt.writeUInt32BE(this.ssrc, 8);
-    payload.copy(pkt, RTP_HEADER);
+    if (ext) {
+      pkt.writeUInt16BE(EXT_PROFILE, RTP_HEADER);
+      pkt.writeUInt16BE(2, RTP_HEADER + 2); // length in 32-bit words
+      pkt.writeBigUInt64BE(BigInt(Math.round(captureMs)), RTP_HEADER + 4);
+    }
+    payload.copy(pkt, hdr);
     this.seq = (this.seq + 1) & 0xffff;
     this.packetsSent++;
     this.octetsSent += payload.length;
@@ -127,9 +147,14 @@ function parseRtp(buf) {
   const extension = (buf[0] & 0x10) !== 0;
   const csrcCount = buf[0] & 0x0f;
   let offset = RTP_HEADER + csrcCount * 4;
+  let captureMs = null;
   if (extension) {
     if (buf.length < offset + 4) return null;
-    offset += 4 + buf.readUInt16BE(offset + 2) * 4;
+    const words = buf.readUInt16BE(offset + 2);
+    if (buf.readUInt16BE(offset) === EXT_PROFILE && words === 2 && buf.length >= offset + EXT_SIZE) {
+      captureMs = Number(buf.readBigUInt64BE(offset + 4));
+    }
+    offset += 4 + words * 4;
   }
   let end = buf.length;
   if (padding) end -= buf[buf.length - 1];
@@ -140,13 +165,14 @@ function parseRtp(buf) {
     seq: buf.readUInt16BE(2),
     timestamp: buf.readUInt32BE(4),
     ssrc: buf.readUInt32BE(8),
+    captureMs,
     payload: buf.subarray(offset, end),
   };
 }
 
 /**
  * RTP/H.264 depacketizer. push() an RTP packet; completed access units come back as
- * { timestamp, nals } (the marker bit or a timestamp change ends an access unit).
+ * { timestamp, captureMs, nals } (the marker bit or a timestamp change ends an access unit).
  * Lost packets are detected from sequence gaps: a fragmented NAL that lost a fragment is
  * dropped instead of being delivered corrupted.
  */
@@ -162,7 +188,7 @@ class RtpDepacketizer {
     this._fuBroken = false;
   }
 
-  /** @returns {{timestamp:number, nals:Buffer[]}[]} */
+  /** @returns {{timestamp:number, captureMs:number|null, nals:Buffer[]}[]} */
   push(packet) {
     const rtp = parseRtp(packet);
     if (!rtp) return [];
@@ -193,7 +219,8 @@ class RtpDepacketizer {
     if (this._au && this._au.timestamp !== rtp.timestamp) {
       done.push(this._finishAu()); // previous AU had no marker (lost): emit what we have
     }
-    if (!this._au) this._au = { timestamp: rtp.timestamp, nals: [], damaged: false };
+    if (!this._au) this._au = { timestamp: rtp.timestamp, captureMs: null, nals: [], damaged: false };
+    if (rtp.captureMs !== null && this._au.captureMs === null) this._au.captureMs = rtp.captureMs;
     if (gap) this._au.damaged = true;
 
     this._payload(rtp.payload);
@@ -247,7 +274,7 @@ class RtpDepacketizer {
 /**
  * Depacketizer for media where one RTP packet always carries exactly one complete, independently
  * decodable frame (e.g. one Opus audio frame) - no NAL/STAP-A/FU-A reassembly needed. push() an
- * RTP packet; returns the frame as [{ timestamp, payload }] (empty array if the packet was invalid
+ * RTP packet; returns the frame as [{ timestamp, captureMs, payload }] (empty array if the packet was invalid
  * or a duplicate/late arrival).
  */
 class RtpFrameDepacketizer {
@@ -277,11 +304,23 @@ class RtpFrameDepacketizer {
     this.packetsReceived++;
     this.octetsReceived += rtp.payload.length;
 
-    return [{ timestamp: rtp.timestamp, payload: Buffer.from(rtp.payload) }];
+    return [{ timestamp: rtp.timestamp, captureMs: rtp.captureMs, payload: Buffer.from(rtp.payload) }];
   }
 }
 
+/** Control messages: MSG_CONTROL byte followed by UTF-8 JSON. */
+function encodeControl(obj) {
+  return Buffer.concat([Buffer.from([MSG_CONTROL]), Buffer.from(JSON.stringify(obj), 'utf8')]);
+}
+
+/** @returns {object|null} null when the datagram is not a valid control message */
+function decodeControl(buf) {
+  if (buf.length < 2 || buf[0] !== MSG_CONTROL) return null;
+  try { return JSON.parse(buf.toString('utf8', 1)); } catch { return null; }
+}
+
 module.exports = {
-  RTP_HEADER, CLOCK_RATE, PT_H264, PT_OPUS, OPUS_CLOCK_RATE, OPUS_SAMPLES_PER_FRAME, DEFAULT_MAX_PACKET,
+  RTP_HEADER, CLOCK_RATE, PT_H264, PT_OPUS, PT_H264_OLD, PT_OPUS_OLD, MSG_CONTROL, OPUS_CLOCK_RATE, OPUS_SAMPLES_PER_FRAME, DEFAULT_MAX_PACKET,
+  encodeControl, decodeControl,
   RtpPacketizer, RtpDepacketizer, RtpFrameDepacketizer, parseRtp,
 };

@@ -2,7 +2,7 @@
 // One camera on the host: DTLS transport -> RTP depacketizer -> (recorder, decoder) -> live frame.
 
 const { EventEmitter } = require('node:events');
-const { RtpDepacketizer, RtpFrameDepacketizer, parseRtp, toAnnexB, nalType, NAL, PT_H264, PT_OPUS } = require('camera-shared');
+const { RtpDepacketizer, RtpFrameDepacketizer, parseRtp, toAnnexB, nalType, NAL, PT_H264, PT_OPUS, PT_H264_OLD, PT_OPUS_OLD } = require('camera-shared');
 const { CameraClient } = require('./camera-client');
 const { JpegDecoder, jpegSize } = require('./decoder');
 const { CameraStorage } = require('./storage');
@@ -37,7 +37,17 @@ class Camera extends EventEmitter {
     this.unknownPayloadType = 0;
     this.videoRtp = new RtpDepacketizer();
     this.audioRtp = new RtpFrameDepacketizer();
+    this.oldVideoRtp = new RtpDepacketizer(); // replayed ("old") media has its own SSRCs / PTs
+    this.oldAudioRtp = new RtpFrameDepacketizer();
+    this.oldVideoFrames = 0;
+    this.oldAudioFrames = 0;
+    this.lastCaptureMs = null; // newest camera capture time received live (video or audio)
+    this.lastVideoCaptureMs = null;
+    this.lastAudioCaptureMs = null;
+    this.syncFromMs = null; // set while a sync request is outstanding (not yet sync_done)
+    this._syncSeq = 0;
     this._needKey = true;
+    this._oldNeedKey = true;
     this._window = []; // { t, bytes } per access unit, for fps / bitrate
     this._audioWindow = []; // { t, bytes } per audio frame, for bitrate
 
@@ -45,6 +55,7 @@ class Camera extends EventEmitter {
     this.client.on('connected', (info) => this._onConnected(info));
     this.client.on('disconnected', (reason) => this._onDisconnected(reason));
     this.client.on('rtp', (pkt) => this._onRtp(pkt));
+    this.client.on('control', (msg) => this._onControl(msg));
     this.decoder.on('frame', (jpeg) => this._onFrame(jpeg));
   }
 
@@ -64,12 +75,41 @@ class Camera extends EventEmitter {
     this.connectedSince = new Date();
     this.videoRtp = new RtpDepacketizer(); // new session => new RTP streams
     this.audioRtp = new RtpFrameDepacketizer();
+    this.oldVideoRtp = new RtpDepacketizer();
+    this.oldAudioRtp = new RtpFrameDepacketizer();
     this._needKey = true;
+    this._oldNeedKey = true;
     this._window = [];
     this._audioWindow = [];
     this.decoder.reset();
     this.storage.event('connected', {
       dtls: { version: info.version, cipher: info.cipher, group: info.group, signature: info.signature, peer: info.peerSubject },
+    });
+    this._requestSync();
+  }
+
+  // Ask the camera for what we missed. `fromMs` is the camera's own clock (last capture time we
+  // saw); no `toMs`, so the camera picks "now" and host/camera clock skew never matters. If the
+  // previous sync was cut short by another outage, resume from where that one started.
+  _requestSync() {
+    const fromMs = this.syncFromMs ?? this.lastCaptureMs;
+    if (fromMs === null) return; // first connection ever: nothing was missed
+    const reqId = ++this._syncSeq;
+    this.syncFromMs = fromMs;
+    if (this.client.sendControl({ type: 'sync', reqId, fromMs })) {
+      this.log('info', `requesting sync from ${new Date(fromMs).toISOString()}`);
+      this.storage.event('sync_request', { reqId, fromMs, from: new Date(fromMs).toISOString() });
+    }
+  }
+
+  _onControl(msg) {
+    if (msg.type !== 'sync_done') return;
+    this.storage.endOldSegments();
+    this.syncFromMs = null;
+    this.log('info', `sync done: ${msg.videoFrames} video / ${msg.audioFrames} audio frame(s)`);
+    this.storage.event('sync_done', {
+      reqId: msg.reqId, videoFrames: msg.videoFrames, audioFrames: msg.audioFrames,
+      from: msg.fromMs && new Date(msg.fromMs).toISOString(), to: msg.toMs && new Date(msg.toMs).toISOString(),
     });
   }
 
@@ -90,12 +130,42 @@ class Camera extends EventEmitter {
       for (const au of this.videoRtp.push(pkt)) this._onVideoAu(au);
     } else if (rtp.payloadType === PT_OPUS) {
       for (const f of this.audioRtp.push(pkt)) this._onAudioFrame(f);
+    } else if (rtp.payloadType === PT_H264_OLD) {
+      for (const au of this.oldVideoRtp.push(pkt)) this._onOldVideoAu(au);
+    } else if (rtp.payloadType === PT_OPUS_OLD) {
+      for (const f of this.oldAudioRtp.push(pkt)) this._onOldAudioFrame(f);
     } else {
       this.unknownPayloadType++;
     }
   }
 
+  // Replayed media goes to disk only: never to the live decoder / dashboard / needKey state.
+  _onOldVideoAu(au) {
+    const isIdr = au.nals.some((n) => nalType(n) === NAL.IDR);
+    if (au.damaged || au.captureMs === null) { this._oldNeedKey = true; return; }
+    if (this._oldNeedKey) {
+      if (!isIdr) return;
+      this._oldNeedKey = false;
+    }
+    this.oldVideoFrames++;
+    this.storage.writeOldAccessUnit(toAnnexB(au.nals), isIdr, au.captureMs);
+  }
+
+  _onOldAudioFrame(f) {
+    if (f.captureMs === null) return;
+    this.oldAudioFrames++;
+    this.storage.writeOldAudioFrame(f.payload, f.captureMs);
+  }
+
+  _noteCapture(kind, ms) {
+    if (ms === null) return;
+    if (kind === 'video') this.lastVideoCaptureMs = Math.max(this.lastVideoCaptureMs ?? 0, ms);
+    else this.lastAudioCaptureMs = Math.max(this.lastAudioCaptureMs ?? 0, ms);
+    this.lastCaptureMs = Math.max(this.lastCaptureMs ?? 0, ms);
+  }
+
   _onVideoAu(au) {
+    this._noteCapture('video', au.captureMs);
     this.framesReceived++;
     const isIdr = au.nals.some((n) => nalType(n) === NAL.IDR);
     if (au.damaged) {
@@ -115,6 +185,7 @@ class Camera extends EventEmitter {
   }
 
   _onAudioFrame(f) {
+    this._noteCapture('audio', f.captureMs);
     this.audioFramesReceived++;
     this._audioWindow.push({ t: Date.now(), bytes: f.payload.length });
     this.storage.writeAudioFrame(f.payload);
@@ -165,6 +236,13 @@ class Camera extends EventEmitter {
       rtp: {
         video: { packetsReceived: this.videoRtp.packetsReceived, packetsLost: this.videoRtp.packetsLost, octetsReceived: this.videoRtp.octetsReceived },
         audio: { packetsReceived: this.audioRtp.packetsReceived, packetsLost: this.audioRtp.packetsLost, octetsReceived: this.audioRtp.octetsReceived },
+      },
+      sync: {
+        lastCaptureMs: this.lastCaptureMs,
+        // positive: audio is newer than video (camera clock); useful to eyeball A/V alignment
+        audioMinusVideoMs: this.lastAudioCaptureMs !== null && this.lastVideoCaptureMs !== null ? this.lastAudioCaptureMs - this.lastVideoCaptureMs : null,
+        pending: this.syncFromMs !== null,
+        oldVideoFrames: this.oldVideoFrames, oldAudioFrames: this.oldAudioFrames,
       },
       unknownPayloadType: this.unknownPayloadType,
       lastFrameAt: this.latestFrameAt && this.latestFrameAt.toISOString(),

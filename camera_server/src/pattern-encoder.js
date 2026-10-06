@@ -47,7 +47,7 @@ class PatternEncoder extends EventEmitter {
         if (!au) continue;
         const idr = au.some((n) => nalType(n) === NAL.IDR);
         const timestamp = (this.frameNo++ * ticksPerFrame) >>> 0;
-        this.emit('au', { nals: au, idr, timestamp, frameNo: this.frameNo });
+        this.emit('au', { nals: au, idr, timestamp, captureMs: Date.now(), frameNo: this.frameNo });
       }
     });
     let stderr = '';

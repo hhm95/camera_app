@@ -105,6 +105,8 @@ function createApi({ cameras, dataDir, dashboardDir }) {
       video: day.video.map((f) => ({ ...f, url: url('video', f.name) })),
       frames: day.frames.map((f) => ({ ...f, url: url('frames', f.name) })),
       audio: day.audio.map((f) => ({ ...f, url: url('audio', f.name) })),
+      videoOld: day.videoOld.map((f) => ({ ...f, url: url('video_old', f.name) })),
+      audioOld: day.audioOld.map((f) => ({ ...f, url: url('audio_old', f.name) })),
     });
   });
 

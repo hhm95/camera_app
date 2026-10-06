@@ -40,7 +40,7 @@ class AudioEncoder extends EventEmitter {
       for (const packet of parser.push(chunk)) {
         if (packetIdx++ < HEADER_PACKETS) continue; // OpusHead / OpusTags
         const timestamp = (this.frameNo++ * OPUS_SAMPLES_PER_FRAME) >>> 0;
-        this.emit('frame', { payload: packet, timestamp, frameNo: this.frameNo });
+        this.emit('frame', { payload: packet, timestamp, captureMs: Date.now(), frameNo: this.frameNo });
       }
     });
     let stderr = '';
